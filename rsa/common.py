@@ -184,7 +184,8 @@ def crt(a_values, modulo_values):
     return x
 
 
-def xor(a: bytes, b: bytes) -> bytes:
+def xor(a, b):
+    # type: (bytes, bytes) -> bytes
     """
     Calculates a XOR b. The lengths of a and b should be equal.
 

@@ -93,7 +93,8 @@ def mgf1(seed, length, hasher='SHA-1'):
     return output[:length]
 
 
-def encrypt(message: bytes, pub_key: PublicKey, label: bytes=b'', hasher: str='SHA-1', **kwargs) -> bytes:
+def encrypt(message, pub_key, label=b'', hasher='SHA-1', **kwargs):
+    # type: (bytes, PublicKey, bytes, str, dict) -> bytes
     """
     Encrypts the given message using OAEP.
     For a complete documentation see https://tools.ietf.org/html/rfc8017#section-7.1.1
@@ -180,8 +181,10 @@ def encrypt(message: bytes, pub_key: PublicKey, label: bytes=b'', hasher: str='S
     return ct
 
 
-def decrypt(ct: bytes, priv_key: PrivateKey, label: bytes=b'', hasher='SHA-1') -> bytes:
-    def split_data_block(_db: bytes, _h_len: int) -> (bytes, bytes):
+def decrypt(ct, priv_key, label=b'', hasher='SHA-1'):
+    # type: (bytes, PrivateKey, bytes, str) -> bytes
+    def split_data_block(_db, _h_len):
+        # type: (bytes, bytes) -> (bytes, bytes)
         _l_hash = _db[0:_h_len]
         i = _h_len
         for i in range(_h_len, len(_db)):
@@ -252,7 +255,8 @@ def decrypt(ct: bytes, priv_key: PrivateKey, label: bytes=b'', hasher='SHA-1') -
     return message
 
 
-def sign(message, priv_key: PrivateKey, hasher='SHA-1', salt_len: int = None):
+def sign(message, priv_key, hasher='SHA-1', salt_len = None):
+    # type: (bytes, PrivateKey, str, int) -> bytes
     # Determine the size of the hash output (hLen)
     try:
         h_len = pkcs1.HASH_METHODS[hasher]().digest_size
@@ -295,7 +299,8 @@ def sign(message, priv_key: PrivateKey, hasher='SHA-1', salt_len: int = None):
     return sig
 
 
-def verify(message: bytes, signature: bytes, pub_key: PublicKey, hasher: str='SHA-1', salt_len: int = None) -> bool:
+def verify(message, signature, pub_key, hasher='SHA-1', salt_len=None):
+    # type: (bytes, bytes, PublicKey, str, int) -> bool
     # Determine the size of the hash output (hLen)
     try:
         h_len = pkcs1.HASH_METHODS[hasher]().digest_size
