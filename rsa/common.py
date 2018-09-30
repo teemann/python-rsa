@@ -14,6 +14,8 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
+import sys
+
 from rsa._compat import zip
 
 """Common functionality shared by several modules."""
@@ -180,6 +182,20 @@ def crt(a_values, modulo_values):
         x = (x + a_i * M_i * inv) % m
 
     return x
+
+
+def xor(a: bytes, b: bytes) -> bytes:
+    """
+    Calculates a XOR b. The lengths of a and b should be equal.
+
+    :param a: The first argument
+    :param b: The second argument
+    :return: a XOR b. The length is always len(a)
+    """
+    int_a = int.from_bytes(a, sys.byteorder)
+    int_b = int.from_bytes(b, sys.byteorder)
+    int_res = int_a ^ int_b
+    return int_res.to_bytes(len(a), sys.byteorder)
 
 
 if __name__ == '__main__':

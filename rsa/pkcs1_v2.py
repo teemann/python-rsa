@@ -20,11 +20,20 @@ This module implements certain functionality from PKCS#1 version 2. Main
 documentation is RFC 2437: https://tools.ietf.org/html/rfc2437
 """
 
+import math
+import sys
 from rsa._compat import range
 from rsa import (
     common,
     pkcs1,
     transform,
+    PublicKey,
+    PrivateKey,
+    randnum,
+    core,
+    DecryptionError,
+    SigningError,
+    VerificationError
 )
 
 
@@ -84,8 +93,259 @@ def mgf1(seed, length, hasher='SHA-1'):
     return output[:length]
 
 
+def encrypt(message: bytes, pub_key: PublicKey, label: bytes=b'', hasher: str='SHA-1', **kwargs) -> bytes:
+    """
+    Encrypts the given message using OAEP.
+    For a complete documentation see https://tools.ietf.org/html/rfc8017#section-7.1.1
+
+    :param message: Message to be encrypted. The length must be smaller than or equal to k - 2hLen - 2.
+        Where hLen denotes the length in octets of the hash function output and k denotes the length on octets
+        of the RSA modulus n.
+    :param pub_key: Recipient's RSA public key
+    :param label: Optional label to be associated with the message
+    :param hasher: The hash function's name
+    :param kwargs: Used internally for testing-purposes
+    :return: The ciphertext of length k
+    """
+
+    # The following code implements RSAES-OAEP-ENCRYPT (rfc8017 7.1.1). The variable names of the specification are
+    # put in parentheses. Also, the corresponding step# from the document is included in the comments.
+
+    # Determine the size of the hash output (hLen)
+    try:
+        h_len = pkcs1.HASH_METHODS[hasher]().digest_size
+    except KeyError:
+        raise ValueError(
+            'Invalid `hasher` specified. Please select one of: {hash_list}'.format(
+                hash_list=', '.join(sorted(pkcs1.HASH_METHODS.keys()))
+            )
+        )
+
+    # Determine the length of the message in bytes (mLen)
+    m_len = len(message)
+
+    # Step 1: Length checking:
+    # a.)   The label cannot be longer than the maximum input-length of the hash-function
+    #       Hardcoded the maximum input-length to 2**61 - 1 (SHA-1)
+    if len(label) > 2**61 - 1:
+        raise OverflowError('Label too long')
+
+    # Determine the size of the public key in bytes (k)
+    k = common.byte_size(pub_key.n)
+
+    # b.)   The message length can be at most k - 2hLen - 2
+    if m_len > k - 2*h_len - 2:
+        raise OverflowError('Message too long')
+
+    # Step 2: EME-OAEP encoding
+    # a.)   l_hash = Hash(label)
+    l_hash = pkcs1.compute_hash(label, hasher)
+
+    # b.)   Generate a padding string (ps)
+    ps = b'\x00'*(k - m_len - 2*h_len - 2)
+
+    # c.)   Construct the data block (db)
+    #       db = l_hash || ps || 0x01 || message
+    db = b''.join((l_hash, ps, b'\x01', message))
+
+    # d.)   Generate a random hash
+    # Used only for testing-purposes. This should NEVER be set in production as it might compromise security!
+    if 'test_seed' in kwargs:
+        seed = kwargs['test_seed']
+    else:
+        seed = randnum.read_random_bits(h_len * 8)
+
+    # e-h.) Calculate the masks
+    db_mask = mgf1(seed, k - h_len - 1, hasher)
+    masked_db = common.xor(db, db_mask)
+    seed_mask = mgf1(masked_db, h_len, hasher)
+    masked_seed = common.xor(seed, seed_mask)
+
+    # i.)   Construct the encoded message
+    #       em = 0x00 || masked_seed || masked_db
+    em = b''.join((b'\x00', masked_seed, masked_db))
+
+    # Step 3: RSA encryption
+    # a.)   Convert em to an integer
+    #       m = OS2IP(em)
+    m = transform.bytes2int(em)
+
+    # b.)   Apply the RSAEP encryption primitive
+    #       c = RSAEP(pub_key, m)
+    c = core.encrypt_int(m, pub_key.e, pub_key.n)
+
+    # c.)   Convert c to bytes (the ciphertext C)
+    #       ct = I2OSP(c, k)
+    ct = transform.int2bytes(c, k)
+    return ct
+
+
+def decrypt(ct: bytes, priv_key: PrivateKey, label: bytes=b'', hasher='SHA-1') -> bytes:
+    def split_data_block(_db: bytes, _h_len: int) -> (bytes, bytes):
+        _l_hash = _db[0:_h_len]
+        i = _h_len
+        for i in range(_h_len, len(_db)):
+            d = _db[i]
+            if d != 0:
+                break
+        if _db[i] != 0x01:
+            raise DecryptionError('Decryption error')
+        _m = _db[i + 1:]
+        return _l_hash, _m
+
+    # Determine the size of the hash output (hLen)
+    try:
+        h_len = pkcs1.HASH_METHODS[hasher]().digest_size
+    except KeyError:
+        raise ValueError(
+            'Invalid `hasher` specified. Please select one of: {hash_list}'.format(
+                hash_list=', '.join(sorted(pkcs1.HASH_METHODS.keys()))
+            )
+        )
+
+    # Determine the length of the message in bytes (mLen)
+    c_len = len(ct)
+
+    # Step 1: Length checking:
+    # a.)   The label cannot be longer than the maximum input-length of the hash-function
+    #       Hardcoded the maximum input-length to 2**61 - 1 (SHA-1)
+    if len(label) > 2 ** 61 - 1:
+        raise OverflowError('Label too long')
+
+    # Determine the size of the public key in bytes (k)
+    k = common.byte_size(priv_key.n)
+
+    # b.)   The length of the ciphertext must be exactly equal to k
+    if c_len != k:
+        raise DecryptionError('Decryption failed')
+
+    # c.)   k must be larger or equal to 2hLen + 2
+    if k < 2*h_len + 2:
+        raise DecryptionError('Decryption failed')
+
+    # Step 2: RSA decryption
+    # a.)   Convert the ciphertext to an integer c
+    #       c = OS2IP(ct)
+    c = transform.bytes2int(ct)
+
+    # b.)   Apply the RSADP decryption primitive
+    #       m = RSADP(priv_key, c)
+    m = priv_key.blinded_decrypt(c)
+
+    # c.)   Convert to bytes (encoded message em)
+    #       em = I2OSP(m, k)
+    em = transform.int2bytes(m, k)
+
+    l_hash = pkcs1.compute_hash(label, hasher)
+    y, masked_seed, masked_db = em[0], em[1:h_len+1], em[h_len+1:]
+
+    seed_mask = mgf1(masked_db, h_len, hasher)
+    seed = common.xor(masked_seed, seed_mask)
+    db_mask = mgf1(seed, k - h_len - 1, hasher)
+    db = common.xor(masked_db, db_mask)
+
+    l_hash2, message = split_data_block(db, h_len)
+
+    if l_hash != l_hash2 or y != 0x00:
+        raise DecryptionError('Decryption error')
+
+    return message
+
+
+def sign(message, priv_key: PrivateKey, hasher='SHA-1', salt_len: int = None):
+    # Determine the size of the hash output (hLen)
+    try:
+        h_len = pkcs1.HASH_METHODS[hasher]().digest_size
+    except KeyError:
+        raise ValueError(
+            'Invalid `hasher` specified. Please select one of: {hash_list}'.format(
+                hash_list=', '.join(sorted(pkcs1.HASH_METHODS.keys()))
+            )
+        )
+
+    # Determine the size of the public key in bytes (k)
+    k = common.byte_size(priv_key.n)
+    mod_bits = k * 8 - 1
+    em_len = math.ceil(mod_bits / 8)
+    if len(message) > 2 ** 61 - 1:
+        raise OverflowError('message too long')
+    m_hash = pkcs1.compute_hash(message, hasher)
+    s_len = salt_len if salt_len is not None else h_len
+    if em_len < h_len + s_len + 2:
+        raise SigningError('Encoding error')
+    salt = b'' if s_len == 0 else randnum.read_random_bits(s_len * 8)
+    m2 = b''.join((b'\x00'*8, m_hash, salt))
+    h = pkcs1.compute_hash(m2, hasher)
+    ps = b'\x00'*(em_len - s_len - h_len - 2)
+    db = b'\x01'.join((ps, salt))
+    db_mask = mgf1(h, em_len - h_len - 1, hasher)
+    masked_db = bytearray(common.xor(db, db_mask))
+
+    a = 0xff
+    for _ in range(8*em_len - mod_bits):
+        a = a >> 1
+    masked_db[0] &= a
+    # for i in range(8*em_len - mod_bits + 1):
+    #     masked_db[0] &= ~(1 << (7-i))
+    em = b''.join((masked_db, h, b'\xbc'))
+    m = transform.bytes2int(em)
+    # s = priv_key.blinded_encrypt(m)
+    s = core.encrypt_int(m, priv_key.d, priv_key.n)
+    sig = transform.int2bytes(s, k)
+    return sig
+
+
+def verify(message: bytes, signature: bytes, pub_key: PublicKey, hasher: str='SHA-1', salt_len: int = None) -> bool:
+    # Determine the size of the hash output (hLen)
+    try:
+        h_len = pkcs1.HASH_METHODS[hasher]().digest_size
+    except KeyError:
+        raise ValueError(
+            'Invalid `hasher` specified. Please select one of: {hash_list}'.format(
+                hash_list=', '.join(sorted(pkcs1.HASH_METHODS.keys()))
+            )
+        )
+    # Determine the size of the public key in bytes (k)
+    k = common.byte_size(pub_key.n)
+    mod_bits = k * 8 - 1
+    em_len = math.ceil(mod_bits / 8)
+    s = transform.bytes2int(signature)
+    m = core.decrypt_int(s, pub_key.e, pub_key.n)  # Use encrypt_int because of the additional range-checking
+    em = transform.int2bytes(m, em_len)
+    # EMSA-PSS-VERIFY (m, em, mod_bits)
+    if len(message) > 2 ** 61 - 1:
+        raise VerificationError('Incorrect signature')
+    m_hash = pkcs1.compute_hash(message, hasher)
+    s_len = salt_len if salt_len is not None else h_len
+    if em_len < h_len + s_len + 2:
+        raise VerificationError('Incorrect signature')
+    if em[-1] != 0xbc:
+        raise VerificationError('Incorrect signature')
+
+    masked_db, h = em[:em_len - h_len - 1], em[em_len - h_len - 1:-1]
+
+    for i in range(8*em_len - mod_bits):
+        if masked_db[0] & (1 << (7 - i)) != 0:
+            raise VerificationError('Incorrect signature')
+    db_mask = mgf1(h, em_len - h_len - 1, hasher)
+    db = bytearray(common.xor(masked_db, db_mask))
+    a = 0xff
+    for _ in range(8 * em_len - mod_bits):
+        a = a >> 1
+    db[0] &= a
+    for i in range(em_len - h_len - s_len - 2):
+        if db[i] != 0:
+            raise VerificationError('Incorrect signature')
+    if db[em_len - h_len - s_len - 2] != 0x01:
+        raise VerificationError('Incorrect signature')
+    salt = db[-s_len:] if s_len > 0 else b''
+    m2 = b''.join((b'\x00'*8, m_hash, salt))
+    h2 = pkcs1.compute_hash(m2, hasher)
+    return h == h2
+
+
 __all__ = [
-    'mgf1',
+    'mgf1', 'encrypt', 'decrypt', 'sign', 'verify'
 ]
 
 if __name__ == '__main__':

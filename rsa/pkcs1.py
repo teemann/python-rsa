@@ -66,6 +66,10 @@ class VerificationError(CryptoError):
     """Raised when verification fails."""
 
 
+class SigningError(CryptoError):
+    """Raised when the signing fails"""
+
+
 def _pad_for_encryption(message, target_length):
     r"""Pads the message for encryption, returning the padded message.
 
@@ -422,7 +426,7 @@ def _find_method_hash(clearsig):
 
 
 __all__ = ['encrypt', 'decrypt', 'sign', 'verify',
-           'DecryptionError', 'VerificationError', 'CryptoError']
+           'DecryptionError', 'VerificationError', 'CryptoError', 'SigningError']
 
 if __name__ == '__main__':
     print('Running doctests 1000x or until failure')
